@@ -182,7 +182,7 @@ def get_dm_value(
 
     """
     dm_value = 0
-    for i in tqdm(range(num_data), desc="get dm_value", leave=False):
+    for i in tqdm(range(num_data), desc="get dm value", leave=False):
         context = contexts[i]
         for k in range(slate_size):
             item_feature = item_features[slates[i, k]]
@@ -193,6 +193,96 @@ def get_dm_value(
             dm_value += r_hat
     dm_value /= num_data
     return dm_value
+
+
+def get_naive_value(
+    num_data: int,
+    slate_size: int,
+    slates_b: np.ndarray,
+    slates_e: np.ndarray,
+    sampled_reward: np.ndarray,
+) -> np.float64:
+    """Naive推定量を取得する
+
+    Args:
+        num_data: データ数
+        slate_size: スレートサイズ
+        slates_b: behavior policyによって選ばれたスレート (n_rounds, slate_size)
+        slates_e: 評価したい方策によって選ばれたスレート (n_rounds, slate_size)
+        sampled_reward: 観測報酬 (n_rounds, slate_size)
+
+    Returns:
+        naive_value: Naive推定量
+
+    """
+    naive_value = 0
+    cnt = 0
+    for i in tqdm(range(num_data), desc="get naive value", leave=False):
+        for k in range(slate_size):
+            item_b = slates_b[i, k]
+            item_e = slates_e[i, k]
+            if item_b != item_e:
+                continue
+            reward = sampled_reward[i, k]
+            reward /= np.log2(k + 2)
+            naive_value += reward
+            cnt += 1
+    if cnt == 0:
+        return np.nan
+    naive_value /= cnt
+    return naive_value
+
+
+def get_dr_value(
+    num_data: int,
+    slate_size: int,
+    slates_b: np.ndarray,
+    slates_e: np.ndarray,
+    sampled_reward: np.ndarray,
+    reward_model: LogisticRegression,
+    contexts: np.ndarray,
+    item_features: np.ndarray,
+    dm_value_e: np.float64,
+) -> np.float64:
+    """DR推定量を取得する
+
+    Args:
+        num_data: データ数
+        slate_size: スレートサイズ
+        slates_b: behavior policyによって選択されたスレート (n_rounds, slate_size)
+        slates_e: 評価したい方策によって選択されたスレート (n_rounds, slate_size)
+        sampled_reward: 観測報酬 (n_rounds, slate_size)
+        reward_model: 報酬予測モデル
+        contexts: ユーザー特徴量 (n_rounds, dim_context)
+        item_features: アイテム特徴量 (n_items, dim_item_feature)
+        dv_value_e: 評価したい方策のDM推定量
+
+    Returns:
+        dr_value: DR推定量
+
+    """
+    dr_first_term_sum = 0
+    cnt = 0
+    for i in tqdm(range(num_data), desc="get dr value", leave=False):
+        context = contexts[i]
+        for k in range(slate_size):
+            item_b = slates_b[i, k]
+            item_e = slates_e[i, k]
+            if item_b != item_e:
+                continue
+            reward = sampled_reward[i, k]
+            item_feature = item_features[slates_e[i, k]]
+            r_hat = reward_model.predict_proba(
+                np.concatenate([context, item_feature]).reshape(1, -1)
+            )[0][1]
+            dr_first_term = reward / np.log2(k + 2) - r_hat / np.log2(k + 2)
+            dr_first_term_sum += dr_first_term
+            cnt += 1
+    if cnt == 0:
+        return np.nan
+    dr_first_term_sum /= cnt
+    dr_value = dr_first_term_sum + dm_value_e
+    return dr_value
 
 
 def main():
@@ -270,13 +360,53 @@ def main():
             num_data, slate_size, contexts, item_features, slates_e, reward_model
         )
 
+        naive_value_b = get_naive_value(
+            num_data, slate_size, slates_b, slates_b, sampled_reward
+        )
+        naive_value_e = get_naive_value(
+            num_data, slate_size, slates_b, slates_e, sampled_reward
+        )
+
+        dr_value_b = get_dr_value(
+            num_data,
+            slate_size,
+            slates_b,
+            slates_b,
+            sampled_reward,
+            reward_model,
+            contexts,
+            item_features,
+            dm_value_b,
+        )
+        dr_value_e = get_dr_value(
+            num_data,
+            slate_size,
+            slates_b,
+            slates_e,
+            sampled_reward,
+            reward_model,
+            contexts,
+            item_features,
+            dm_value_e,
+        )
+
         result_df = pd.DataFrame(
             [
                 {
                     "estimator": "dm",
                     "pred_value_b": dm_value_b,
                     "pred_value_e": dm_value_e,
-                }
+                },
+                {
+                    "estimator": "naive",
+                    "pred_value_b": naive_value_b,
+                    "pred_value_e": naive_value_e,
+                },
+                {
+                    "estimator": "dr",
+                    "pred_value_b": dr_value_b,
+                    "pred_value_e": dr_value_e,
+                },
             ]
         )
         result_df["seed"] = seed
